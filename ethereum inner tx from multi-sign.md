@@ -1,0 +1,320 @@
+## ethereum inner transaction from multi-sign
+
+### 多重支付
+
+合约内的交易有一部分是从多重支付合约中进行交易的，这样的交易占有一定数量，不可忽视
+
+#### 多重支付的流程
+
+1. ``A1`` , ``A2`` , ``A3`` ... ``An`` 多人创建多重签名钱包 ``W`` ，一笔需要确认的交易所需要的确认数为 ``c``
+2. 交易分为两种类型：
+
+	i. 小额交易。交易发起之后，不需要其他人进行额外确认的交易。此时直接调用钱包内的 ``_to.call.value(_value)``，并在调用之前，记录 ``Event`` ``SingleTransact(msg.sender,_value,_to,_data)``。
+	
+	ii. 大额交易。交易发起之后，首先会生成一个``pending ID`` 或者叫 ``operation hash``，并且记录 ``Event`` ``ConfirmationNeeded(operation_hash,msg.sender,_value,_to,_data)``；然后除了发起人之外的所有钱包 ``owner`` 全部都有 ``approve`` 或者 ``revoke`` 的权利，每当一个 ``owner`` ``approve`` 时，便调用一次钱包的 ``confirm`` 函数，该函数通过 ``motifier`` ``onlymanyowners`` 来判断是否该交易的确认量达到 ``require`` 数量，当有 ``c-1`` 个 ``owner`` ``approve`` 时，交易确认，调用钱包内的 ``_to.call.value(_value)``，并且记录 ``Event`` ``MultiTransact(msg.sender,_value,_to,_data)``
+
+#### 多重签名钱包中用于追踪支付的几个事件
+(from: [https://github.com/ethereum/dapp-bin/blob/master/wallet/wallet.sol](https://github.com/ethereum/dapp-bin/blob/master/wallet/wallet.sol))：
+
+1. ``SingleTransact(address owner, uint value, address to, bytes data)``。不需要其他人确认便能成功的交易
+2. ``MultiTransact(address owner, bytes32 operation, uint value, address to, bytes data)``。需要其他人确认的交易
+3. ``ConfirmationNeeded(bytes32 operation, address initiator, uint value, address to, bytes data)``
+
+#### 事件对应的``sha3``:
+
+event|sha3
+---|---
+SingleTransact(address,uint,address,bytes)|0x445f3b1593752f1807d47c8549d98637703837d503a7971201876d9c072efe18
+MultiTransact(address,bytes32,uint,address,bytes)|0xe60bd15ab9577360584cd02243c6869e7d31ac68dffe4a3f7ad0f9c3066e1114
+ConfirmationNeeded(bytes32,address,uint,address,bytes)|0xee8fc5eea1ca2ab8f61d7fbecae7012cf9dd3531fce04d44982aea6d677609e9
+
+
+### ``SingleTransaction`` 例子，及问题
+
+例如我们发起了一笔小额交易，拿到的 ``transaction_receipt`` 是这样的：
+
+```json
+{
+  blockHash: "0x1d543ca89e31171309bd0d2562746b493b1955af61cd8d3794968df53ec99451",
+  blockNumber: 906,
+  contractAddress: null,
+  cumulativeGasUsed: 57116,
+  from: "0x951ef4e03c695903b408cd72575983c2536ead22",
+  gasUsed: 57116,
+  logs: [{
+      address: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+      blockHash: "0x1d543ca89e31171309bd0d2562746b493b1955af61cd8d3794968df53ec99451",
+      blockNumber: 906,
+      data: "0x000000000000000000000000951ef4e03c695903b408cd72575983c2536ead220000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000093398c78c7605e4ce26be5ee0c08119dd32490920000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000c746573744d756c7469536967",
+      logIndex: 0,
+      removed: false,
+      topics: ["0x92ca3a80853e6663fa31fa10b99225f18d4902939b4c53a9caae9043f6efd004"],
+      transactionHash: "0xe569ae84290a415fbf59df3e53c784b13e5ddf974fddf9e958b0992fb7c075ec",
+      transactionIndex: 0
+  }],
+  logsBloom: "0x00000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  root: "0xcde0bb20151d24747dcc260ffeae177c9907cb9cffde733f22e812d41d7817aa",
+  to: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+  transactionHash: "0xe569ae84290a415fbf59df3e53c784b13e5ddf974fddf9e958b0992fb7c075ec",
+  transactionIndex: 0
+}
+```
+
+``topics`` 对应的值的第一位应该对应的就是其中某个 ``event`` 的 ``sha3``，此例中 ``topics`` 中仅一个值：``0x92ca3a80853e6663fa31fa10b99225f18d4902939b4c53a9caae9043f6efd004``，那么这个值应该就是上表中的 ``SingleTransaction`` 的 ``sha3`` 了。但是我们计算出来的 ``SingleTransaction`` 的 ``sha3`` 为 ``0x445f3b1593752f1807d47c8549d98637703837d503a7971201876d9c072efe18``，那么问题出现在哪里
+
+#### 坑，及更正
+
+通过查看现有版本的多重签名钱包合约ABI，发现实际上该``Event``的``uint``那一项实际为``uint256``，同时，``MultiTransact``和 ``ConfirmationNeeded`` 中的 ``uint`` 均应为 ``uint256``。这样，实际上各 ``event`` 对应的 ``sha3`` 应该如下：
+
+event|sha3
+---|---
+SingleTransact(address,uint256,address,bytes)|0x92ca3a80853e6663fa31fa10b99225f18d4902939b4c53a9caae9043f6efd004
+MultiTransact(address,bytes32,uint256,address,bytes)|0xe7c957c06e9a662c1a6c77366179f5b702b97651dc28eee7d5bf1dff6e40bb4a
+ConfirmationNeeded(bytes32,address,uint256,address,bytes)|0x1733cbb53659d713b79580f79f3f9ff215f78a7c7aa45890f3b89fc5cddfbf32
+
+更正了 ``event`` 的 ``sha3`` 之后，这笔交易的记录告诉我们，这笔交易记录了 ``SingleTransaction``，也就是合约内部的以太坊交易。
+
+``data`` 为
+
+```json
+0x000000000000000000000000951ef4e03c695903b408cd72575983c2536ead220000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000093398c78c7605e4ce26be5ee0c08119dd32490920000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000c746573744d756c7469536967
+```
+
+为了方便，把 ``data`` 分为多行显示一下：
+
+```json
+0x
+// msg.sender
+000000000000000000000000951ef4e03c695903b408cd72575983c2536ead22
+// value
+0000000000000000000000000000000000000000000000000de0b6b3a7640000
+// to
+00000000000000000000000093398c78c7605e4ce26be5ee0c08119dd3249092
+0000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000c746573744d756c7469536967
+```
+结果就很明显了。所以，对于 ``SingleTransaction`` 的内部交易，到这里为止，是可以成功查询到的
+
+### ``MultiTransaction`` 例子
+
+首先，我们发起了一笔需要经过多人 ``approve`` 的交易，``transaction_receipt`` 如下：
+
+```json
+{
+  blockHash: "0x0e64336efdab81bdebd0c5ac4a7b36fc64ed097183776a17fa3fdb17c56ba921",
+  blockNumber: 931,
+  contractAddress: null,
+  cumulativeGasUsed: 174876,
+  from: "0x951ef4e03c695903b408cd72575983c2536ead22",
+  gasUsed: 174876,
+  logs: [{
+      address: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+      blockHash: "0x0e64336efdab81bdebd0c5ac4a7b36fc64ed097183776a17fa3fdb17c56ba921",
+      blockNumber: 931,
+      data: "0x000000000000000000000000951ef4e03c695903b408cd72575983c2536ead2276c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877",
+      logIndex: 0,
+      removed: false,
+      topics: ["0xe1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda"],
+      transactionHash: "0xccad9b557b6caf236b858b975e442e7f25d6f85564875b9ceb6a8850946bb113",
+      transactionIndex: 0
+  }, {
+      address: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+      blockHash: "0x0e64336efdab81bdebd0c5ac4a7b36fc64ed097183776a17fa3fdb17c56ba921",
+      blockNumber: 931,
+      data: "0x76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877000000000000000000000000951ef4e03c695903b408cd72575983c2536ead2200000000000000000000000000000000000000000000000098a7d9b8314c0000000000000000000000000000b77148a0cf9fcb6dd734d438b9d0eb595b026f1100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000",
+      logIndex: 1,
+      removed: false,
+      topics: ["0x1733cbb53659d713b79580f79f3f9ff215f78a7c7aa45890f3b89fc5cddfbf32"],
+      transactionHash: "0xccad9b557b6caf236b858b975e442e7f25d6f85564875b9ceb6a8850946bb113",
+      transactionIndex: 0
+  }],
+  logsBloom: "0x00000000000000000000000000000000000000404000000000020000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000200000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000040000000000000000",
+  root: "0x926759aa2996d2283133b0280ba379117953c315a66aec7bfb99f2cb5c195562",
+  to: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+  transactionHash: "0xccad9b557b6caf236b858b975e442e7f25d6f85564875b9ceb6a8850946bb113",
+  transactionIndex: 0
+}
+```
+
+可以看到：
+
+1. ``logs`` 中包含两个 ``log``，一个的 ``topics`` 指向一个暂时未知的事件 ``0xe1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda ``；而另外一个 ``topics`` 指向上面的 ``ConfirmationNeeded (0x1733cbb53659d713b79580f79f3f9ff215f78a7c7aa45890f3b89fc5cddfbf32)``。
+2. 从第一条 ``log`` 中我们拿到了 ``data``: 
+
+	```json
+	0x
+	000000000000000000000000951ef4e03c695903b408cd72575983c2536ead22
+	76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877
+	```
+	；从第二条 ``log`` 中拿到 ``data``：
+	
+	```json
+	0x
+	76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877
+	000000000000000000000000951ef4e03c695903b408cd72575983c2536ead22
+	00000000000000000000000000000000000000000000000098a7d9b8314c0000
+	000000000000000000000000b77148a0cf9fcb6dd734d438b9d0eb595b026f11
+	00000000000000000000000000000000000000000000000000000000000000a0
+	0000000000000000000000000000000000000000000000000000000000000000
+	```
+
+#### 分析
+
+从第二条 ``log`` 中，至少我们可以拿到很多有用的数据：这笔交易是``000000000000000000000000951ef4e03c695903b408cd72575983c2536ead22`` 发起的，发送 ``00000000000000000000000000000000000000000000000098a7d9b8314c0000`` 到 ``000000000000000000000000b77148a0cf9fcb6dd734d438b9d0eb595b026f11``，如果需要 ``approve`` 这笔交易的话，需要拿着 ``operation hash`` ``76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877``
+
+同时，经过对钱包合约的探索，发现第一条指向的 ``event`` 是 ``Confirmation``，即发起这笔交易的 ``owner`` ``000000000000000000000000951ef4e03c695903b408cd72575983c2536ead22`` 在发起交易的时候，其实就已经进行 ``approve`` 的操作了。
+
+
+更新 ``event`` 表如下：
+
+event|sha3
+---|---
+SingleTransact(address,uint256,address,bytes)|0x92ca3a80853e6663fa31fa10b99225f18d4902939b4c53a9caae9043f6efd004
+MultiTransact(address,bytes32,uint256,address,bytes)|0xe7c957c06e9a662c1a6c77366179f5b702b97651dc28eee7d5bf1dff6e40bb4a
+ConfirmationNeeded(bytes32,address,uint256,address,bytes)|0x1733cbb53659d713b79580f79f3f9ff215f78a7c7aa45890f3b89fc5cddfbf32
+Confirmation(address,bytes32)|0xe1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda
+
+#### 另外的 ``owner`` 确认
+
+接下来使用某个 ``owner`` 进行 ``approve``，拿到了另外一个 ``transaction_receipt``：
+
+```json
+{
+  blockHash: "0x99c2ec1a91ae4ae01899101b24aed531bbea082508e6d62b296411cf6b199a2e",
+  blockNumber: 935,
+  contractAddress: null,
+  cumulativeGasUsed: 50212,
+  from: "0xc6119b9148d8559cb4b236200117a6f514b3b285",
+  gasUsed: 50212,
+  logs: [{
+      address: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+      blockHash: "0x99c2ec1a91ae4ae01899101b24aed531bbea082508e6d62b296411cf6b199a2e",
+      blockNumber: 935,
+      data: "0x000000000000000000000000c6119b9148d8559cb4b236200117a6f514b3b28576c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877",
+      logIndex: 0,
+      removed: false,
+      topics: ["0xe1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda"],
+      transactionHash: "0x44cee9fa6b15db563592d53221b2bc4272375985995e65a7e4e38801eab08df9",
+      transactionIndex: 0
+  }, {
+      address: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+      blockHash: "0x99c2ec1a91ae4ae01899101b24aed531bbea082508e6d62b296411cf6b199a2e",
+      blockNumber: 935,
+      data: "0x000000000000000000000000c6119b9148d8559cb4b236200117a6f514b3b28576c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e9587700000000000000000000000000000000000000000000000098a7d9b8314c0000000000000000000000000000b77148a0cf9fcb6dd734d438b9d0eb595b026f1100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000",
+      logIndex: 1,
+      removed: false,
+      topics: ["0xe7c957c06e9a662c1a6c77366179f5b702b97651dc28eee7d5bf1dff6e40bb4a"],
+      transactionHash: "0x44cee9fa6b15db563592d53221b2bc4272375985995e65a7e4e38801eab08df9",
+      transactionIndex: 0
+  }],
+  logsBloom: "0x00000000000000000000000000000000000000400000000000020000000000000000000000000000000000000000000200000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000040000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000040000000000000000",
+  root: "0x0ea2f083e3d88af7d99c22d5f5b178a8e9166268fe6ce21b3bab383d1bfaf1b5",
+  to: "0xe181483b82ba53c7579115e2cdeffb1d5c77fc82",
+  transactionHash: "0x44cee9fa6b15db563592d53221b2bc4272375985995e65a7e4e38801eab08df9",
+  transactionIndex: 0
+}
+```
+
+此时，在 ``transaction_receipt`` 中我们依然发现 ``logs`` 中有两条 ``log``：
+
+从第一条 ``log`` 中可以拿到下面的数据：
+
+``topics``：
+
+```json
+0x
+e1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda
+```
+
+``data``:
+
+```json
+0x
+000000000000000000000000c6119b9148d8559cb4b236200117a6f514b3b285
+76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877
+```
+
+这告诉我们，记录的事件是 ``Confirmation``，表示交易的 ``from`` 账户已经 ``approve`` 了这笔交易，并且可以看到，使用的 ``operation_hash`` 依然是 ``76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877``，和前面那笔交易的 ``operation_hash`` 是一样的。
+
+第二条 ``log`` 中可以拿到下面的数据：
+
+``topics``：
+
+```json
+0x
+e7c957c06e9a662c1a6c77366179f5b702b97651dc28eee7d5bf1dff6e40bb4a
+```
+
+``data``：
+
+```json
+0x
+000000000000000000000000c6119b9148d8559cb4b236200117a6f514b3b285
+76c694c1e10db7a27180993c65a5bfc85ee6d100d22b8b4822723a1f49e95877
+00000000000000000000000000000000000000000000000098a7d9b8314c0000
+000000000000000000000000b77148a0cf9fcb6dd734d438b9d0eb595b026f11
+00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000
+```
+
+此时的 ``topics`` 指向事件 ``MultiTransact``，表示此时交易所需要的全部确认数已经达到，所以直接发起了交易。并且，经过测试发现，只有当确认数量达到 ``reqirement`` 时，才会在该 ``transaction_recept`` 中出现两条 ``logs``，否则 ``logs`` 中只会记录一条 ``Confirmation``
+
+#### ``revoke`` 交易
+
+下面这个 ``transaction_receipt`` 说明了某个钱包的 ``owner`` 对一笔 ``multi-sig`` 进行了 ``revoke`` 操作：
+
+```json
+{
+  blockHash: "0x981dd4b05f46d7036fb9a05e8b1d0faaecff5c99d0cf6ed54975301307c85612",
+  blockNumber: 983,
+  contractAddress: null,
+  cumulativeGasUsed: 36441,
+  from: "0x951ef4e03c695903b408cd72575983c2536ead22",
+  gasUsed: 36441,
+  logs: [{
+      address: "0xd3200756c107c41e7bf86d334d4246b2b1e57024",
+      blockHash: "0x981dd4b05f46d7036fb9a05e8b1d0faaecff5c99d0cf6ed54975301307c85612",
+      blockNumber: 983,
+      data: "0x000000000000000000000000951ef4e03c695903b408cd72575983c2536ead2260164b06d36da9b5359d5066a77c1773ac7eccf59543a6441177f70d8964b891",
+      logIndex: 0,
+      removed: false,
+      topics: ["0xc7fb647e59b18047309aa15aad418e5d7ca96d173ad704f1031a2c3d7591734b"],
+      transactionHash: "0x3be0c2952e9cde0d26f053dcb2558698d68918d227f20521687e58300a2cc287",
+      transactionIndex: 0
+  }],
+  logsBloom: "0x00000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000008000000000000000000080000000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  root: "0xd04bc524c1f4e036b51692ec997784a3ee7423bfaefce3e2a907a0b4530f77d9",
+  to: "0xd3200756c107c41e7bf86d334d4246b2b1e57024",
+  transactionHash: "0x3be0c2952e9cde0d26f053dcb2558698d68918d227f20521687e58300a2cc287",
+  transactionIndex: 0
+}
+```
+
+通过对钱包合约的解读，发现此 ``transaction_receipt`` 的 ``topics`` 指向的是 ``event`` ``Revoke``。
+
+更新 ``event`` 表如下：
+
+event|sha3
+---|---
+SingleTransact(address,uint256,address,bytes)|0x92ca3a80853e6663fa31fa10b99225f18d4902939b4c53a9caae9043f6efd004
+MultiTransact(address,bytes32,uint256,address,bytes)|0xe7c957c06e9a662c1a6c77366179f5b702b97651dc28eee7d5bf1dff6e40bb4a
+ConfirmationNeeded(bytes32,address,uint256,address,bytes)|0x1733cbb53659d713b79580f79f3f9ff215f78a7c7aa45890f3b89fc5cddfbf32
+Confirmation(address,bytes32)|0xe1c52dc63b719ade82e8bea94cc41a0d5d28e4aaf536adb5e9cccc9ff8c1aeda
+Revoke(address,bytes32)|0xc7fb647e59b18047309aa15aad418e5d7ca96d173ad704f1031a2c3d7591734b
+
+
+其实上述交易是一笔通过 ``3 of 4`` ``wallet`` 发起的交易，在该 ``owner`` ``revoke`` 之前，交易的 ``approval`` 数量是 ``2``，而在 ``revoke`` 之后， ``approval`` 数量竟然变成了 ``1``。这告诉我们， ``revoke`` 不是拒绝，而是某个用户之前如果进行了 ``Approve`` 操作，那么他可以继续通过 ``Revoke`` 操作将之前的 ``Approval`` 进行撤回。而没有进行 ``Approve`` 操作的账户，只有 ``Approve`` 的权限。
+![可以``Revoke``](https://ws1.sinaimg.cn/large/0068RNvDgy1fktbpgxr8aj31lq06gtaa.jpg)
+![只能``Approve``](https://ws1.sinaimg.cn/large/0068RNvDgy1fktbkpu48lj31nm06iq4i.jpg)
+
+
+### 多重支付的 inner transaction 小结
+
+从上面的例子中可以看出来，只需要从 ``transaction_recepit`` 中去确认 ``logs`` 中是否有两条 ``log``：
+
+1. 如果只有一条 ``log``，如果其中的 ``topics`` 指向的是 ``SingleTransact``
+2. 如果有两条 ``log``，并且第一条的 ``log`` 指向 ``Confirm`` 同时第二条 ``log`` 指向 ``MultiTransact``
+
+那么便可以从对应的 ``data`` 中获取到本交易中的以太坊内部交易数量
+
+但是仅仅凭 ``logs`` 去判断是否有 inner transaction 是不正确的，**因为 logs 可以伪造**，这也是现有交易所基本上都不支持使用合约或者多重签名钱包充入ETH的原因。
+
+而[etherscan.io](etherscan.io)可以准确判断inner transaction，是因为该网站技术实力雄厚，能够通过EVM模拟运行transaction，从底层判断交易中是否有inner transaction。这项技术本身是非常复杂的，需要投入大量精力和时间去研究。之前也有所研究，不过到30%左右时，精力放在了其他项目上，此计划暂时搁置。
