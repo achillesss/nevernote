@@ -1,0 +1,46 @@
+{
+    "output": null,
+    "generator": "site",
+    "title": "",
+    "description": null,
+    "extension": null,
+    "github": null,
+    "githubHost": "https://github.com/",
+    "plugins": [
+        "-lunr"
+    ],
+    "pluginsConfig": {
+        "fontSettings": {
+            "theme": "sepia",
+            "family": "serif",
+            "size": 1
+        },
+        "search": {
+            "maxIndexSize": 100000
+        }
+    },
+    "links": {
+        "sidebar": {
+            "Custom link name": "https://customlink.com"
+        },
+        "sharing": {
+            "google": null,
+            "facebook": null,
+            "twitter": null,
+            "weibo": null,
+            "all": null
+        }
+    },
+    "pdf": {
+        "toc": true,
+        "pageNumbers": false,
+        "fontSize": 12,
+        "paperSize": "a4",
+        "margin": {
+            "right": 62,
+            "left": 62,
+            "top": 36,
+            "bottom": 36
+        }
+    }
+}
