@@ -1,2 +1,3 @@
-# nevernote
-chaos to order
+# 不爱做笔记
+
+但是有时候记点东西还是挺好的
