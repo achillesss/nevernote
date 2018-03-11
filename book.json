@@ -7,6 +7,7 @@
     "github": null,
     "githubHost": "https://github.com/",
     "plugins": [
+        "mathjax-full",
         "-lunr"
     ],
     "pluginsConfig": {
